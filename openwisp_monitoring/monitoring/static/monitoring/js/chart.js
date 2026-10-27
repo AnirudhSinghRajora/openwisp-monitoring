@@ -1,6 +1,73 @@
 "use strict";
 
 (function ($) {
+  function setBarWidths(charts, x, layout) {
+    var bars = charts.filter(function (chart) {
+      return (
+        chart.type === "bar" &&
+        chart.visible !== false &&
+        chart.visible !== "legendonly"
+      );
+    });
+    if (
+      !bars.length ||
+      x.length < 3 ||
+      (layout.xaxis.type && layout.xaxis.type !== "date")
+    ) {
+      return false;
+    }
+    var positions = x.map(function (value) {
+      // Match Plotly's offset-free date coordinates, not the browser's timezone.
+      return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)
+        ? Date.parse(value.replace(" ", "T") + "Z")
+        : NaN;
+    });
+    var intervals = positions.slice(1).map(function (position, i) {
+      return position - positions[i];
+    });
+    if (
+      intervals.some(function (interval) {
+        return !isFinite(interval) || interval <= 0;
+      })
+    ) {
+      return false;
+    }
+    var sorted = intervals.slice().sort(function (a, b) {
+      return a - b;
+    });
+    var interval = sorted[Math.floor(sorted.length / 2)];
+    if (sorted[0] === interval) {
+      return false;
+    }
+    // A short interval must only narrow its neighbors, not every bar in the plot.
+    var gap = layout.bargap === undefined ? 0.2 : layout.bargap;
+    var widths = new Map();
+    x.forEach(function (value, i) {
+      var width = Math.min(
+        interval,
+        intervals[i - 1] || interval,
+        intervals[i] || interval,
+      );
+      widths.set(value, width * (1 - gap));
+    });
+    var grouped = !layout.barmode || layout.barmode === "group";
+    var groupgap = layout.bargroupgap || 0;
+    bars.forEach(function (chart, index) {
+      var slots = chart.x.map(function (value) {
+        return widths.get(value) / (grouped ? bars.length : 1);
+      });
+      chart.width = slots.map(function (slot) {
+        return slot * (1 - groupgap);
+      });
+      if (grouped) {
+        chart.offset = slots.map(function (slot) {
+          return slot * (index - bars.length / 2 + groupgap / 2);
+        });
+      }
+    });
+    return true;
+  }
+
   function sortByTraceOrder(traceOrder, arr, propertyName) {
     if (traceOrder === undefined) {
       return arr;
@@ -322,7 +389,21 @@
       layout.yaxis = { range: [0, fixedYMax] };
     }
 
-    Plotly.newPlot(plotlyContainer, charts, layout, { responsive: true });
+    var customBarWidths = setBarWidths(charts, x, layout);
+    Plotly.newPlot(plotlyContainer, charts, layout, { responsive: true }).then(
+      function (plot) {
+        if (customBarWidths) {
+          plot.on("plotly_restyle", function (event) {
+            if (
+              Object.prototype.hasOwnProperty.call(event[0], "visible") &&
+              setBarWidths(plot.data, x, plot.layout)
+            ) {
+              Plotly.redraw(plot);
+            }
+          });
+        }
+      },
+    );
 
     // custom legends when using color map
     if (data.colorscale && data.colorscale.map) {

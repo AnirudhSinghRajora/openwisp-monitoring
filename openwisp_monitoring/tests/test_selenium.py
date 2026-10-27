@@ -291,6 +291,136 @@ class TestDashboardCharts(
             self.web_driver.execute_script("return window.dashboardChartRequests;"), 0
         )
 
+    def test_bar_widths_with_irregular_timestamps(self):
+        self.login()
+        day = 24 * 60 * 60 * 1000
+        regular = [f"2024-03-{date:02d} 00:00" for date in range(20, 28)]
+        irregular = regular[:4] + ["2024-03-23 23:00"] + regular[4:]
+        geometry = """
+            const plot = document.querySelector('#bar-width-test .js-plotly-plot');
+            const bars = plot.calcdata.filter(trace => trace[0].trace.type === 'bar' &&
+                trace[0].trace.visible === true);
+            let overlaps = false;
+            const intervals = [];
+            for (const trace of bars) {
+                for (const point of trace) {
+                    intervals.push([point.x - point.w / 2, point.x + point.w / 2]);
+                }
+            }
+            if (plot.layout.barmode !== 'stack') {
+                intervals.sort((a, b) => a[0] - b[0]);
+                overlaps = intervals.some((item, i) => i &&
+                    item[0] < intervals[i - 1][1] - 1);
+            } else {
+                overlaps = bars.some(trace => trace.some((point, i) => i &&
+                    point.x - point.w / 2 <
+                    trace[i - 1].x + trace[i - 1].w / 2 - 1));
+            }
+            return {
+                width: bars[0][0].w,
+                overlaps,
+                x: plot.data[0].x,
+                y: plot.data[0].y,
+                scatterWidths: plot.data.filter(trace => trace.type === 'scatter')
+                    .some(trace => trace.width !== undefined),
+            };
+        """
+        for chart_type, count in (("bar", 1), ("bar", 2), ("stackedbar+lines", 2)):
+            legend_width = None
+            for x in (regular, irregular):
+                with self.subTest(
+                    chart_type=chart_type, count=count, irregular=x == irregular
+                ):
+                    error = self.web_driver.execute_async_script(
+                        """
+                        document.querySelector('#bar-width-test')?.remove();
+                        const container = document.createElement('div');
+                        container.id = 'bar-width-test';
+                        container.style.width = '1000px';
+                        container.innerHTML = '<div class="js-plotly-plot"></div>';
+                        document.body.appendChild(container);
+                        const [x, type, count] = arguments;
+                        const traces = Array.from({length: count}, (_, i) =>
+                            ['trace_' + i, x.map(() => i + 1)]);
+                        const data = {traces, unit: ''};
+                        if (type === 'stackedbar+lines') {
+                            data.trace_type = {trace_0: 'stackedbar', trace_1: 'stackedbar',
+                                total: 'lines'};
+                            traces.push(['total', x.map(() => 3)]);
+                        }
+                        const done = arguments[arguments.length - 1];
+                        const newPlot = Plotly.newPlot;
+                        let ready;
+                        Plotly.newPlot = function (...args) {
+                            ready = newPlot.apply(this, args);
+                            return ready;
+                        };
+                        try {
+                            window.createChart(data, x, container.id, '', type);
+                        } finally {
+                            Plotly.newPlot = newPlot;
+                        }
+                        ready.then(() => done(null)).catch(error => done(String(error)));
+                        """,
+                        x,
+                        chart_type,
+                        count,
+                    )
+                    self.assertIsNone(error, f"Chart rendering failed: {error}")
+                    result = self.web_driver.execute_script(geometry)
+                    divisor = count if chart_type == "bar" else 1
+                    self.assertAlmostEqual(
+                        result["width"],
+                        day * 0.8 / divisor,
+                        msg="One short timestamp interval must not shrink every bar.",
+                    )
+                    self.assertFalse(
+                        result["overlaps"], "Rendered bars must not overlap."
+                    )
+                    self.assertEqual(result["x"], x)
+                    self.assertEqual(result["y"], [1] * len(x))
+                    self.assertFalse(result["scatterWidths"])
+                    if chart_type == "bar" and count == 2:
+                        error = self.web_driver.execute_async_script("""
+                            const done = arguments[arguments.length - 1];
+                            const plot = document.querySelector(
+                                '#bar-width-test .js-plotly-plot');
+                            Plotly.restyle(plot, window.JSON.parse('{"visible":"legendonly"}'), [1])
+                                .then(() => done()).catch(error => done(String(error)));
+                        """)
+                        self.assertIsNone(error, f"Legend update failed: {error}")
+                        if legend_width is None:
+                            legend_width = self.web_driver.execute_script(geometry)[
+                                "width"
+                            ]
+                        else:
+                            self.wait_for_script(
+                                "return (function() {"
+                                + geometry
+                                + "})().width === arguments[0];",
+                                legend_width,
+                            )
+                        self.assertFalse(
+                            self.web_driver.execute_script(geometry)["overlaps"]
+                        )
+                        error = self.web_driver.execute_async_script("""
+                            const done = arguments[arguments.length - 1];
+                            const plot = document.querySelector(
+                                '#bar-width-test .js-plotly-plot');
+                            Plotly.restyle(plot, window.JSON.parse('{"visible":true}'), [1])
+                                .then(() => done()).catch(error => done(String(error)));
+                        """)
+                        self.assertIsNone(error, f"Legend restore failed: {error}")
+                        self.wait_for_script(
+                            "return (function() {"
+                            + geometry
+                            + "})().width === arguments[0];",
+                            day * 0.8 / count,
+                        )
+                        self.assertFalse(
+                            self.web_driver.execute_script(geometry)["overlaps"]
+                        )
+
 
 @tag("selenium_tests")
 class TestWifiSessionInlineAdmin(

@@ -14,3 +14,7 @@ OpenWISP Monitoring adds two timeseries charts to the admin dashboard:
 
 You can configure the interfaces included in the **General traffic chart**
 using the :ref:`openwisp_monitoring_dashboard_traffic_chart` setting.
+
+When timestamps are unevenly spaced, bars next to shorter intervals become
+narrower without making all the other bars thin. This only changes how the
+chart is displayed; timestamps, values, and summaries remain unchanged.
